@@ -60,12 +60,21 @@ body {
 }
 
 @media (max-width: 900px) {
-  .app-main {
-    grid-template-columns: 1fr;
+  .app {
+    padding: 0.75rem 0.5rem;
   }
 
-  .app {
-    padding: 1rem 0.5rem;
+  .app-header {
+    padding: 1rem 0 0.75rem;
+  }
+
+  .app-header h1 {
+    font-size: 1.5rem;
+  }
+
+  .app-main {
+    grid-template-columns: 1fr;
+    gap: 1rem;
   }
 
   .camera-panel {
@@ -74,9 +83,23 @@ body {
   }
 
   .camera-container {
+    aspect-ratio: unset;
+    height: 75vh;
     border-radius: 0;
     border-left: none;
     border-right: none;
+  }
+}
+
+@media (max-width: 900px) and (max-height: 700px) {
+  .camera-container {
+    height: 65vh;
+  }
+}
+
+@media (max-width: 900px) and (min-height: 800px) {
+  .camera-container {
+    height: 80vh;
   }
 }
 
