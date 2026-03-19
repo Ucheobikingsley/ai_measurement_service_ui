@@ -1,16 +1,17 @@
 import { useRef, useEffect, useCallback, useState } from "react";
 import {
-  PoseLandmarker,
-  FilesetResolver,
-  DrawingUtils,
-} from "@mediapipe/tasks-vision";
-import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
+  loadModel,
+  detectPose as yoloDetectPose,
+  isModelLoaded,
+  COCO_SKELETON,
+} from "../utils/yoloPose";
+import type { Keypoint } from "../utils/yoloPose";
 import {
   computeMeasurements,
   isBodyFullyVisible,
   averageMeasurements,
-  type BodyMeasurements,
 } from "../utils/measurement";
+import type { BodyMeasurements } from "../utils/measurement";
 
 interface CameraProps {
   userHeightCm: number;
@@ -22,6 +23,67 @@ interface CameraProps {
 const SMOOTHING_BUFFER_SIZE = 10;
 const STABLE_FRAMES_REQUIRED = 15;
 const TARGET_FPS = 15;
+const MODEL_URL = "/yolo11n-pose.onnx";
+
+function drawKeypoints(
+  ctx: CanvasRenderingContext2D,
+  keypoints: Keypoint[],
+  w: number,
+  h: number
+): void {
+  for (const kp of keypoints) {
+    if (kp.confidence < 0.3) {
+      continue;
+    }
+
+    ctx.beginPath();
+    ctx.arc(kp.x * w, kp.y * h, 4, 0, 2 * Math.PI);
+    ctx.fillStyle = "#00FF8899";
+    ctx.fill();
+    ctx.strokeStyle = "#00FF88";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+}
+
+function drawSkeleton(
+  ctx: CanvasRenderingContext2D,
+  keypoints: Keypoint[],
+  w: number,
+  h: number
+): void {
+  ctx.strokeStyle = "#00CCFF";
+  ctx.lineWidth = 2;
+
+  for (const [i, j] of COCO_SKELETON) {
+    const a = keypoints[i];
+    const b = keypoints[j];
+
+    if (a.confidence < 0.3 || b.confidence < 0.3) {
+      continue;
+    }
+
+    ctx.beginPath();
+    ctx.moveTo(a.x * w, a.y * h);
+    ctx.lineTo(b.x * w, b.y * h);
+    ctx.stroke();
+  }
+}
+
+function isUserStable(keypoints: Keypoint[]): boolean {
+  const leftShoulder = keypoints[5];
+  const rightShoulder = keypoints[6];
+
+  if (!leftShoulder || !rightShoulder) {
+    return false;
+  }
+
+  if (leftShoulder.confidence < 0.5 || rightShoulder.confidence < 0.5) {
+    return false;
+  }
+
+  return Math.abs(leftShoulder.y - rightShoulder.y) < 0.03;
+}
 
 export default function Camera({
   userHeightCm,
@@ -31,44 +93,30 @@ export default function Camera({
 }: CameraProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const landmarkerRef = useRef<PoseLandmarker | null>(null);
-  const drawingUtilsRef = useRef<DrawingUtils | null>(null);
 
   const animFrameRef = useRef<number>(0);
   const lastFrameTimeRef = useRef(0);
+  const inferringRef = useRef(false);
 
   const bufferRef = useRef<BodyMeasurements[]>([]);
   const stableFrameCountRef = useRef(0);
 
   const [cameraReady, setCameraReady] = useState(false);
+  const [modelReady, setModelReady] = useState(false);
 
-  // ------------------------
-  // Init
-  // ------------------------
-
-  const initLandmarker = useCallback(async () => {
-    const vision = await FilesetResolver.forVisionTasks(
-      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
-    );
-
-    landmarkerRef.current = await PoseLandmarker.createFromOptions(vision, {
-      baseOptions: {
-        modelAssetPath:
-          "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
-        delegate: "GPU",
-      },
-      runningMode: "VIDEO",
-      numPoses: 1,
-    });
-  }, []);
+  const initModel = useCallback(async () => {
+    try {
+      await loadModel(MODEL_URL);
+      setModelReady(true);
+    } catch (err) {
+      console.error("Failed to load YOLO pose model:", err);
+      onStatusChange("Failed to load pose model");
+    }
+  }, [onStatusChange]);
 
   const startCamera = useCallback(async () => {
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        width: 640,
-        height: 480,
-        facingMode: "user",
-      },
+      video: { width: 640, height: 480, facingMode: "user" },
     });
 
     if (videoRef.current) {
@@ -78,127 +126,95 @@ export default function Camera({
     }
   }, []);
 
-  // ------------------------
-  // Pose Validation (NEW 🔥)
-  // ------------------------
-
-  function isUserStable(landmarks: NormalizedLandmark[]): boolean {
-    const leftShoulder = landmarks[11];
-    const rightShoulder = landmarks[12];
-
-    if (!leftShoulder || !rightShoulder) return false;
-
-    // shoulders should be roughly horizontal
-    const diffY = Math.abs(leftShoulder.y - rightShoulder.y);
-
-    return diffY < 0.03; // tweak threshold
-  }
-
-  // ------------------------
-  // Detection Loop
-  // ------------------------
-
   const detectPose = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    const landmarker = landmarkerRef.current;
 
-    if (!video || !canvas || !landmarker || !scanning) return;
+    if (!video || !canvas || !isModelLoaded()) {
+      return;
+    }
 
     const now = performance.now();
 
-    // 🔥 FPS throttling
-    if (now - lastFrameTimeRef.current < 1000 / TARGET_FPS) {
+    if (now - lastFrameTimeRef.current < 1000 / TARGET_FPS || inferringRef.current) {
       animFrameRef.current = requestAnimationFrame(detectPose);
       return;
     }
+
     lastFrameTimeRef.current = now;
+    inferringRef.current = true;
 
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    yoloDetectPose(video)
+      .then((result) => {
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          return;
+        }
 
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    if (!drawingUtilsRef.current) {
-      drawingUtilsRef.current = new DrawingUtils(ctx);
-    }
+        if (result) {
+          const { keypoints } = result;
 
-    const result = landmarker.detectForVideo(video, now);
+          drawSkeleton(ctx, keypoints, canvas.width, canvas.height);
+          drawKeypoints(ctx, keypoints, canvas.width, canvas.height);
 
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+          const fullyVisible = isBodyFullyVisible(keypoints);
+          const stable = isUserStable(keypoints);
 
-    if (result.landmarks?.length) {
-      const landmarks = result.landmarks[0];
-      const drawingUtils = drawingUtilsRef.current;
+          if (fullyVisible && stable) {
+            stableFrameCountRef.current++;
 
-      // Draw
-      drawingUtils.drawLandmarks(landmarks, {
-        radius: 4,
-        color: "#00FF88",
-        fillColor: "#00FF8899",
+            onStatusChange(
+              `Hold still... (${stableFrameCountRef.current}/${STABLE_FRAMES_REQUIRED})`
+            );
+
+            if (stableFrameCountRef.current >= STABLE_FRAMES_REQUIRED) {
+              const m = computeMeasurements(
+                keypoints,
+                userHeightCm,
+                video.videoWidth,
+                video.videoHeight
+              );
+
+              if (m) {
+                bufferRef.current.push(m);
+
+                if (bufferRef.current.length > SMOOTHING_BUFFER_SIZE) {
+                  bufferRef.current.shift();
+                }
+
+                const smoothed = averageMeasurements(bufferRef.current);
+                onMeasurement(smoothed);
+                onStatusChange("Measurement locked");
+              }
+            }
+          } else {
+            stableFrameCountRef.current = 0;
+
+            if (!fullyVisible) {
+              onStatusChange("Step back — full body not visible");
+            } else {
+              onStatusChange("Stand straight — don't tilt");
+            }
+          }
+        } else {
+          stableFrameCountRef.current = 0;
+          onStatusChange("No body detected");
+        }
+      })
+      .catch(console.error)
+      .finally(() => {
+        inferringRef.current = false;
       });
 
-      drawingUtils.drawConnectors(
-        landmarks,
-        PoseLandmarker.POSE_CONNECTIONS,
-        { color: "#00CCFF", lineWidth: 2 }
-      );
-
-      const fullyVisible = isBodyFullyVisible(landmarks);
-      const stable = isUserStable(landmarks);
-
-      if (fullyVisible && stable) {
-        stableFrameCountRef.current++;
-
-        onStatusChange(
-          `Hold still... (${stableFrameCountRef.current}/${STABLE_FRAMES_REQUIRED})`
-        );
-
-        if (stableFrameCountRef.current >= STABLE_FRAMES_REQUIRED) {
-          const m = computeMeasurements(
-            landmarks,
-            userHeightCm,
-            video.videoWidth,
-            video.videoHeight
-          );
-
-          if (m) {
-            bufferRef.current.push(m);
-
-            if (bufferRef.current.length > SMOOTHING_BUFFER_SIZE) {
-              bufferRef.current.shift();
-            }
-
-            const smoothed = averageMeasurements(bufferRef.current);
-            onMeasurement(smoothed);
-
-            onStatusChange("Measurement locked ✅");
-          }
-        }
-      } else {
-        stableFrameCountRef.current = 0;
-
-        if (!fullyVisible) {
-          onStatusChange("Step back — full body not visible");
-        } else if (!stable) {
-          onStatusChange("Stand straight — don't tilt");
-        }
-      }
-    } else {
-      stableFrameCountRef.current = 0;
-      onStatusChange("No body detected");
-    }
-
     animFrameRef.current = requestAnimationFrame(detectPose);
-  }, [scanning, userHeightCm, onMeasurement, onStatusChange]);
-
-  // ------------------------
-  // Lifecycle
-  // ------------------------
+  }, [userHeightCm, onMeasurement, onStatusChange]);
 
   useEffect(() => {
-    initLandmarker().then(startCamera);
+    initModel().then(startCamera);
 
     return () => {
       cancelAnimationFrame(animFrameRef.current);
@@ -208,10 +224,10 @@ export default function Camera({
         tracks.forEach((t) => t.stop());
       }
     };
-  }, [initLandmarker, startCamera]);
+  }, [initModel, startCamera]);
 
   useEffect(() => {
-    if (scanning && cameraReady && landmarkerRef.current) {
+    if (scanning && cameraReady && modelReady) {
       bufferRef.current = [];
       stableFrameCountRef.current = 0;
       animFrameRef.current = requestAnimationFrame(detectPose);
@@ -222,7 +238,7 @@ export default function Camera({
     }
 
     return () => cancelAnimationFrame(animFrameRef.current);
-  }, [scanning, cameraReady, detectPose]);
+  }, [scanning, cameraReady, modelReady, detectPose]);
 
   return (
     <div className="camera-container" style={{ position: "relative" }}>

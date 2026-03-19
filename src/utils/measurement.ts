@@ -1,19 +1,35 @@
-import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
+import type { Keypoint } from "./yoloPose";
 
 export interface BodyMeasurements {
   shoulder: number;
   hip: number;
   sleeve: number;
 }
+
 interface MeasurementConfig {
   hipFactor: number;
 }
+
 const DEFAULT_CONFIG: MeasurementConfig = {
   hipFactor: 1.9, // tweak between 1.7 - 2.2 after real-world testing
 };
+
+// COCO 17-keypoint indices
+const KP = {
+  NOSE: 0,
+  LEFT_SHOULDER: 5,
+  RIGHT_SHOULDER: 6,
+  LEFT_ELBOW: 7,
+  LEFT_WRIST: 9,
+  LEFT_HIP: 11,
+  RIGHT_HIP: 12,
+  LEFT_ANKLE: 15,
+  RIGHT_ANKLE: 16,
+} as const;
+
 export function distance(
-  a: NormalizedLandmark,
-  b: NormalizedLandmark,
+  a: Keypoint,
+  b: Keypoint,
   width: number,
   height: number
 ): number {
@@ -23,36 +39,36 @@ export function distance(
 }
 
 function pixelBodyHeight(
-  landmarks: NormalizedLandmark[],
+  keypoints: Keypoint[],
   frameHeight: number
 ): number {
-  const nose = landmarks[0];
-  const leftAnkle = landmarks[27];
-  const rightAnkle = landmarks[28];
+  const nose = keypoints[KP.NOSE];
+  const leftAnkle = keypoints[KP.LEFT_ANKLE];
+  const rightAnkle = keypoints[KP.RIGHT_ANKLE];
 
   const ankleY = Math.max(leftAnkle.y, rightAnkle.y);
   return (ankleY - nose.y) * frameHeight;
 }
 
 export function computeMeasurements(
-  landmarks: NormalizedLandmark[],
+  keypoints: Keypoint[],
   userHeightCm: number,
   frameWidth: number,
   frameHeight: number
 ): BodyMeasurements | null {
-  const pxHeight = pixelBodyHeight(landmarks, frameHeight);
+  const pxHeight = pixelBodyHeight(keypoints, frameHeight);
   if (pxHeight <= 0) {
     return null;
   }
 
   const scale = userHeightCm / pxHeight;
 
-  const leftShoulder = landmarks[11];
-  const rightShoulder = landmarks[12];
-  const leftHip = landmarks[23];
-  const rightHip = landmarks[24];
-  const leftElbow = landmarks[13];
-  const leftWrist = landmarks[15];
+  const leftShoulder = keypoints[KP.LEFT_SHOULDER];
+  const rightShoulder = keypoints[KP.RIGHT_SHOULDER];
+  const leftHip = keypoints[KP.LEFT_HIP];
+  const rightHip = keypoints[KP.RIGHT_HIP];
+  const leftElbow = keypoints[KP.LEFT_ELBOW];
+  const leftWrist = keypoints[KP.LEFT_WRIST];
 
   const shoulderPx = distance(leftShoulder, rightShoulder, frameWidth, frameHeight);
   const hipPx = distance(leftHip, rightHip, frameWidth, frameHeight);
@@ -67,19 +83,24 @@ export function computeMeasurements(
   };
 }
 
-export function isBodyFullyVisible(landmarks: NormalizedLandmark[]): boolean {
-  const keyIndices = [0, 11, 12, 13, 15, 23, 24, 27, 28];
+export function isBodyFullyVisible(keypoints: Keypoint[]): boolean {
+  const requiredIndices = [
+    KP.NOSE,
+    KP.LEFT_SHOULDER, KP.RIGHT_SHOULDER,
+    KP.LEFT_ELBOW, KP.LEFT_WRIST,
+    KP.LEFT_HIP, KP.RIGHT_HIP,
+    KP.LEFT_ANKLE, KP.RIGHT_ANKLE,
+  ];
 
-  return keyIndices.every((i) => {
-    const lm = landmarks[i];
+  return requiredIndices.every((i) => {
+    const kp = keypoints[i];
     return (
-      lm &&
-      lm.visibility !== undefined &&
-      lm.visibility > 0.5 &&
-      lm.x >= 0 &&
-      lm.x <= 1 &&
-      lm.y >= 0 &&
-      lm.y <= 1
+      kp &&
+      kp.confidence > 0.5 &&
+      kp.x >= 0 &&
+      kp.x <= 1 &&
+      kp.y >= 0 &&
+      kp.y <= 1
     );
   });
 }
