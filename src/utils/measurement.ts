@@ -5,7 +5,12 @@ export interface BodyMeasurements {
   hip: number;
   sleeve: number;
 }
-
+interface MeasurementConfig {
+  hipFactor: number;
+}
+const DEFAULT_CONFIG: MeasurementConfig = {
+  hipFactor: 1.9, // tweak between 1.7 - 2.2 after real-world testing
+};
 export function distance(
   a: NormalizedLandmark,
   b: NormalizedLandmark,
@@ -57,7 +62,7 @@ export function computeMeasurements(
 
   return {
     shoulder: Math.round(shoulderPx * scale * 100) / 100,
-    hip: Math.round(hipPx * scale * 100) / 100,
+    hip: Math.round(hipPx * scale * DEFAULT_CONFIG.hipFactor * 100) / 100,
     sleeve: Math.round(sleevePx * scale * 100) / 100,
   };
 }
