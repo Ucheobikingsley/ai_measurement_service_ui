@@ -63,6 +63,21 @@ body {
   .app-main {
     grid-template-columns: 1fr;
   }
+
+  .app {
+    padding: 1rem 0.5rem;
+  }
+
+  .camera-panel {
+    margin-left: -0.5rem;
+    margin-right: -0.5rem;
+  }
+
+  .camera-container {
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+  }
 }
 
 /* Camera Panel */
