@@ -161,7 +161,7 @@ export default function Camera({
         ref={videoRef}
         playsInline
         muted
-        style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", borderRadius: "12px" }}
+        style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", borderRadius: "12px" }}
       />
 
       <canvas
